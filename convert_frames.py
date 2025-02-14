@@ -48,7 +48,6 @@ for id in range(1,args.last_frame_id+1):
     if exit_code != 0:
         logging.error(f"Mapper failed with code {exit_code}. Exiting.")
         exit(exit_code)
-
     files = os.listdir(args.source_path + inputDir + "/sparse")
     os.makedirs(args.source_path + inputDir + "/sparse/0", exist_ok=True)
     # Copy each file from the source directory to the destination directory
