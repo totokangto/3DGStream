@@ -74,6 +74,8 @@ class PipelineParams(ParamGroup):
         self.opt_type='3DGStream'
         super().__init__(parser, "Pipeline Parameters")
 
+# 아니 어차피 cfg_args.json에서 받아와서 값 다 달라질거면 이거 왜 초기화함???
+# 3DGS 초기화(train.py)를 위한 거 같음 train_frame.py는 위 주석처럼 하고
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
@@ -97,7 +99,7 @@ class OptimizationParams(ParamGroup):
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
-        self.densify_grad_threshold = 0.0002
+        self.densify_grad_threshold = 0.0002 # default : 0.0002
         self.ntc_conf_path = ""
         self.ntc_path = ""
         self.batch_size = 1

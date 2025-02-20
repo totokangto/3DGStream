@@ -78,8 +78,11 @@ class Scene:
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
-
+        
+        # get ply from prior frame
+        # str(self.loaded_iter) = 15000 -> 150
         if self.loaded_iter:
+            print(f"===========self load iter : {self.loaded_iter}")
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),

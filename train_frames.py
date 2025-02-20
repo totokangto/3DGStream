@@ -31,15 +31,18 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from,tb_writer, frame_num, output_path):
     start_time=time.time()
     last_s1_res = []
     last_s2_res = []
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+    prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree,opt.rotate_sh)
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
-    gaussians.training_one_frame_setup(opt)
+    
+    gaussians.training_setup(opt)
+    
+    gaussians.training_one_frame_setup(opt, frame_num, output_path) # generate NTC instance and initialize MLP
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -65,7 +68,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             gaussians.oneupSHdegree()
                      
         # Query the NTC
-        gaussians.query_ntc()
+        gaussians.query_ntc() # train NTC
         
         loss = torch.tensor(0.).cuda()
         
@@ -110,12 +113,19 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration=iteration, save_type='all')
-
+            """
             # Tracking Densification Stats
-            if iteration > opt.densify_from_iter:
+            if iteration > opt.densify_from_iter: # default : 130
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+            """
+            # add densification of 3DGS
+            if iteration % 15 == 0:
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                size_threshold = None
+                gaussians.densify_and_prune(0.0002, 0.005, scene.cameras_extent, size_threshold)
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -125,6 +135,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.output_path + "/chkpnt" + str(iteration) + ".pth")
+                # 이거 저장된 거 맞음??
 
     s1_end_time=time.time()
     # Densify
@@ -185,16 +196,16 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
                 scene.save(iteration=iteration, save_type='added')
                       
             # Densification
-            if (iteration - opt.iterations) % opt.densification_interval == 0:
+            if (iteration - opt.iterations) % opt.densification_interval == 0: # every 20 iters
                 gaussians.adding_and_prune(opt,scene.cameras_extent)
-                             
+                    
             # Optimizer step
             if iteration < opt.iterations + opt.iterations_s2:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
     s2_end_time=time.time()
     
-    # 计算总训练时间
+    # Calculate total training time
     pre_time = s1_start_time - start_time
     s1_time = s1_end_time - s1_start_time
     s2_time = s2_end_time - s1_end_time
@@ -215,13 +226,6 @@ def prepare_output_and_logger(args):
     with open(os.path.join(args.output_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.output_path)
-    else:
-        print("Tensorboard not available: not logging progress")
-    return tb_writer
 
 def training_report(tb_writer, iteration, Ll1, Lds, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
     last_test_psnr=0.0
@@ -281,14 +285,14 @@ def training_report(tb_writer, iteration, Ll1, Lds, loss, l1_loss, elapsed, test
                 # , 'last_gt':last_gt.cpu()
                 }
 
-def train_one_frame(lp,op,pp,args):
-    args.save_iterations.append(args.iterations + args.iterations_s2)
+def train_one_frame(lp,op,pp,args,tb_writer, result, frame_num, output_path):
+    args.save_iterations.append(args.iterations + args.iterations_s2) # arguments/__init__.py 30,000 + 0    
     if args.depth_smooth==0:
         args.bwd_depth=False
     print("Optimizing " + args.output_path)
     res_dict={}
     if(args.opt_type=='3DGStream'):
-        s1_ress, s2_ress, pre_time, s1_time, s2_time = training_one_frame(lp.extract(args), op.extract(args), pp.extract(args), args.load_iteration, args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+        s1_ress, s2_ress, pre_time, s1_time, s2_time = training_one_frame(lp.extract(args), op.extract(args), pp.extract(args), args.load_iteration, args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, tb_writer, frame_num, output_path)
 
         # All done
         print("\nTraining complete.")
@@ -309,10 +313,20 @@ def train_one_frame(lp,op,pp,args):
                 res_dict[f'stage2/psnr_{idx}']=s2_res['last_test_psnr']
                 res_dict[f'stage2/points_num_{idx}']=s2_res['last_points_num']
             res_dict[f'stage2/time']=s2_time
-    return res_dict 
+        sum_dict = {key: result[key] + res_dict[key] for key in res_dict.keys()}
+    return sum_dict
 
-def train_frames(lp, op, pp, args):
+def train_frames(lp, op, pp, args,tb_writer):
     # Initialize system state (RNG)
+    result = {
+        'stage1/psnr_0' : 0.0,
+        'stage2/psnr_0' : 0.0,
+        'stage1/time' : 0.0,
+        'stage2/time' : 0.0,
+        'stage1/points_num_0' : 0,
+        'stage2/points_num_0' : 0
+    }
+    frame_num = 0
     safe_state(args.quiet)
     video_path=args.video_path
     output_path=args.output_path
@@ -326,14 +340,19 @@ def train_frames(lp, op, pp, args):
     )
     frames=frames[args.frame_start:args.frame_end]
     if args.frame_start==1:
-        args.load_iteration = args.first_load_iteration
+        args.load_iteration = args.first_load_iteration # 15000
     for frame in frames:
+        frame_num += 1
         start_time = time.time()
         args.source_path = os.path.join(video_path, frame)
         args.output_path = os.path.join(output_path, frame)
         args.model_path = model_path
-        train_one_frame(lp,op,pp,args)
-        print(f"Frame {frame} finished in {time.time()-start_time} seconds.")
+        result = train_one_frame(lp,op,pp,args,tb_writer, result, frame_num, output_path)
+        for name, value in result.items():
+            print(f"\n {name} : {value/frame_num:.4f}")
+        print(f" diff #3DG is {result['stage2/points_num_0'] - result['stage1/points_num_0']}")
+
+        print(f"\nFrame {frame} finished in {time.time()-start_time} seconds.\n\n")
         model_path = args.output_path
         args.load_iteration = load_iteration
         torch.cuda.empty_cache()
@@ -349,7 +368,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--frame_start', type=int, default=1)
     parser.add_argument('--frame_end', type=int, default=150)
-    parser.add_argument('--load_iteration', type=int, default=None)
+    parser.add_argument('--load_iteration', type=int, default=None) 
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[1, 50, 100])
@@ -365,7 +384,7 @@ if __name__ == "__main__":
     if args.read_config and args.config_path is not None:
         with open(args.config_path, 'r') as f:
             config = json.load(f)
-        for key, value in config.items():
+        for key, value in config.items(): # in test/flame_steak_suite/cfg_args.json, iterations is 150, iterations_s2 is 100
             if key not in ["output_path", "source_path", "model_path", "video_path", "debug_from"]:
                 setattr(args, key, value)
     serializable_namespace = {k: v for k, v in vars(args).items() if isinstance(v, (int, float, str, bool, list, dict, tuple, type(None)))}
@@ -373,5 +392,32 @@ if __name__ == "__main__":
     os.makedirs(args.output_path, exist_ok = True)
     with open(os.path.join(args.output_path, "cfg_args.json"), 'w') as f:
         f.write(json_namespace)
-    # train_one_frame(lp,op,pp,args)
-    train_frames(lp,op,pp,args)
+    # Create Tensorboard writer
+    tb_writer = None
+    if TENSORBOARD_FOUND:
+        tb_writer = SummaryWriter(args.output_path)
+    else:
+        print("Tensorboard not available: not logging progress")
+    # parameters : modelParams, optimizationParams, pipelineParams
+    train_frames(lp,op,pp,args,tb_writer)
+    """
+    extent = 0 sh_degree = 1 ply_name = points3D.ply images = images_2 resolution = 1 white_background = False data_device = cuda
+
+    eval = True iterations = 150 iterations_s2 = 100 first_load_iteration = 15000 position_lr_init = 0.0024 position_lr_final = 2.4e-05
+
+    position_lr_delay_mult = 0.01 position_lr_max_steps = 30000 feature_lr = 0.0375 opacity_lr = 0.75 scaling_lr = 0.075
+
+    rotation_lr = 0.015 percent_dense = 0.01 lambda_dssim = 0.2 depth_smooth = 0.0 ntc_lr = 0.002 lambda_dxyz = 0 lambda_drot = 0
+
+    densification_interval = 20 opacity_reset_interval = 3000 densify_from_iter = 130 densify_until_iter = 15000 densify_grad_threshold = 0.00015
+
+    ntc_conf_path = configs/cache/cache_F_4.json ntc_path = ntc/flame_steak_ntc_params_F_4.pth batch_size = 1 spawn_type = spawn
+
+    s2_type = spawn s2_adding = True num_of_split = 1 num_of_spawn = 1 std_scale = 2 min_opacity = 0.01 rotate_sh = False only_mlp = False
+
+    convert_SHs_python = False compute_cov3D_python = False debug = False bwd_depth = False opt_type = 3DGStream ip = 127.0.0.1
+
+    port = 6009 detect_anomaly = False test_iterations = [150, 250] save_iterations = [150] frame_start = 1 frame_end = 300
+
+    quiet = False checkpoint_iterations = [] start_checkpoint = None read_config = True load_iteration = 150
+    """
