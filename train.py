@@ -8,7 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import time
 import os
 import torch
 from random import randint
@@ -35,11 +35,10 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians, load_iteration)
-    gaussians.training_setup(opt)
+    gaussians.training_setup(opt) # initialize learning rate
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
-
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -50,7 +49,8 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
-    for iteration in range(first_iter, opt.iterations + 1):        
+    
+    for iteration in range(first_iter, opt.iterations + 1): # 30,000   
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -86,7 +86,6 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
                 pipe.debug = True
             render_pkg = render(viewpoint_cam, gaussians, pipe, background)
             image, depth, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["depth"],render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-
             # Loss
             gt_image = viewpoint_cam.original_image.cuda()
             Ll1 = l1_loss(image, gt_image)
@@ -98,7 +97,7 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
             if(opt.depth_smooth>0):
                 loss+=opt.depth_smooth * Lds
         loss/=opt.batch_size
-        loss.backward()
+        loss.backward() # 23% of total execution time
         iter_end.record()
 
         with torch.no_grad():
@@ -116,19 +115,23 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
+            if iteration % 1500 == 0:
+                print(f"\n========= [ITER {iteration}] #3DGs : {scene.gaussians.get_xyz.shape[0]}\n")    
             # Densification
-            if iteration < opt.densify_until_iter:
+            # 50% of total execution time
+            if iteration < opt.densify_until_iter: # densify or prune by 15,000 iters
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                # densify or prune from 500 iters every 100 iters
+                # reset at 3000 iter
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0: 
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
-
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
@@ -137,6 +140,28 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            """
+            total_end = time.time()
+            back_end = time.time()
+            back_time += back_end
+            back_time -= back_start
+            total_time += total_end
+            total_time -= total_start
+            dens_time += dens_end
+            dens_time -= dens_start
+            log_time += log_end
+            log_time -= log_start
+            opt_time += opt_end
+            opt_time -= opt_start
+            if iteration % 1500 == 0:
+                print(f"total time : {total_time:.3f}")
+                print(f"backward time : {back_time:.3f} ")
+                print(f"densification time : {dens_time:.3f} ")
+                print(f"percent of backward : {100*back_time/total_time:.2f}%")
+                print(f"percent of log : {100*log_time/total_time:.2f}%")
+                print(f"percent of optimize : {100*opt_time/total_time:.2f}%")
+                print(f"percent of densification : {100*(dens_end-dens_start)/(total_end-total_start):.2f}%")
+            """
 
 def prepare_output_and_logger(args):    
     if not args.model_path:

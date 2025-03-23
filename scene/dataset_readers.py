@@ -141,7 +141,13 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, testidx=[0], ply_name="p
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
     reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    # if you train 3dGS
+    # /local_datasets/3dgs/flame_steak/frame000002/images/cam20.png
+    #cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    
+    # if you train 3dgstream
+    # /local_datasets/3dgs/flame_steak/frame000002/cam20.png
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=path)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:
